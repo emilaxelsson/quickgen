@@ -19,50 +19,52 @@ import Testing.QuickGen.Types
 
 generate :: Type -> Int -> Context -> Maybe Exp
 generate t seed ctx = case runGC g seed ctx of
-    Nothing             -> Nothing
-    Just (Prim (e,_,_)) -> Just e
+    Nothing               -> Nothing
+    Just (Prim (_,e,_,_)) -> Just e
   where
     (_, ts) = extractPrimType t
     g       = generate' ts
 
 generate' :: [Type] -> GenContext (Maybe Primitive)
-generate' [t] = replicateM 2 p >>= return . listToMaybe . catMaybes
+generate' [t] = replicateM 5 p >>= return . listToMaybe . catMaybes
   where
     p = do
         m <- randomMatching t
         case m of
-            Nothing                    -> return Nothing
-            Just p@(Prim (e, c, [t]))  -> decUses p >> return m
-            Just p@(Prim (e, c, all@(t:ts))) -> do
+            Nothing                       -> return Nothing
+            Just p@(Prim (_, _, _, [t]))  -> decUses p >> return m
+            Just p@(Prim (_, e, c, t:ts)) -> do
                 decUses p
-                let go [] acc = return (True, acc)
-                    go (t : ts) acc = do
-                        mp <- generate' [t]
+                let go []       acc = return (True, acc)
+                    go (t':ts') acc = do
+                        mp <- generate' [t']
                         case mp of
                             Nothing -> return (False, acc)
-                            Just p  -> go ts (p : acc)
+                            Just p  -> go ts' (p : acc)
+                    ts' = sortBy (comparing (complexity . snd)) (zip [0..] ts)
 
-                (b, args) <- go ts []
+                (b, args) <- go (map snd ts') []
+                let args' = map snd . sortBy (comparing fst) . zip (map fst ts') $ args
                 case b of
-                    False -> mapM_ incUses args >> incUses p >> return Nothing
+                    False -> mapM_ incUses args' >> incUses p >> return Nothing
                     True  ->
-                        let e' = foldl AppE e (map ((^. _1) . unPrimitive) args)
-                        in return (Just (Prim (e', c, [t])))
+                        let e'  = foldl AppE e (map ((^. _2) . unPrimitive) args')
+                        in return (Just (Prim (-1, e', c, [t])))
 
     toExpList :: [Maybe Primitive] -> Maybe [Exp]
-    toExpList = fmap (reverse . map ((^. _1) . unPrimitive)) . sequence
+    toExpList = fmap (reverse . map ((^. _2) . unPrimitive)) . sequence
 
 generate' all@(t:ts) = do
     ret <- localLambda ts (generate' [t])
     case ret of
         Nothing        -> return Nothing
-        Just (Prim (e, c, _)) -> do
+        Just (Prim (_, e, c, _)) -> do
             d <- getDepth
             let vars = [ VarP (mkName [chr (i + d + ord 'a')])
                        | i <- [0 .. length ts - 1]
                        ]
                 e' = LamE vars e
-            return (Just (Prim (e', c, all)))
+            return (Just (Prim (-1, e', c, all)))
 
 randomMatching :: Type -> GenContext (Maybe Primitive)
 randomMatching match = do

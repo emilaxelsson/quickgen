@@ -32,4 +32,5 @@ library
                  , random
                  , transformers
                  , haskell-src-exts
+                 , containers
   hs-source-dirs: src

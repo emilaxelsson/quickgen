@@ -5,6 +5,8 @@ module Testing.QuickGen.TH
        , printTH
        ) where
 
+import Data.Map (Map)
+import qualified Data.Map as M
 import Data.Functor ((<$>))
 import Data.List (nub, sort)
 import Data.Maybe (isJust)
@@ -18,10 +20,10 @@ constructors e = do
     TH.TupE es <- e
     (cs, es') <- unzip <$> mapM f es
 
-    rel <- getRelevantClasses (nub (concat cs))
+    rel <- fmap M.toList . getRelevantClasses . nub . concat $ cs
     rel' <- [| rel |]
 
-    return $ TupE [rel', ListE es'] --
+    return $ TupE [rel', ListE es']
   where
     f e@(TH.VarE name) = do
         info <- TH.reify name
@@ -40,10 +42,24 @@ constructors e = do
 
 -- | Given a list of class names iteratively find new classes
 -- mentioned in either the constraints of a class name or in any of
--- the instances. Returns a list with information about all instances
--- for the initial classes and discovered classes.
-getRelevantClasses :: [TH.Name] -> TH.Q [(TH.Name, [TH.InstanceDec])]
-getRelevantClasses = go []
+-- the instances. Returns a associative list where the key is the name
+-- of the class and the value is a list with all instances of the
+-- current class.
+-- getRelevantClasses :: [TH.Name] -> TH.Q [(TH.Name, [TH.InstanceDec])]
+getRelevantClasses :: [TH.Name] -> TH.Q (Map Name [InstanceDec])
+getRelevantClasses = go M.empty
+  where
+    go m [] = return m
+    go m (n:ns) = do
+        d@(TH.ClassI (TH.ClassD cxt _ _ _ _) is) <- TH.reify n
+        let m' = M.insert n is m
+            new = nub $ [ n'
+                        | TH.ClassP n' _ <- cxt ++ concat [ cxt' | TH.InstanceD cxt' _ _ <- is ]
+                        , n' `notElem` ns && M.notMember n' m'
+                        ]
+        go m' (new ++ ns)
+
+getRelevantClasses' = go []
   where
     go acc [] = return acc
     go acc (n:ns) = do

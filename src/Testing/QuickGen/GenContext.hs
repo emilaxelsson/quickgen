@@ -32,13 +32,16 @@ import System.Random
 
 type Depth = Int
 
-newtype GenContext a = GC { unGC :: State (Depth, Context, StdGen) a }
+newtype GenContext a = GC { unGC :: State (Depth, Context, StdGen, Substitution) a }
   deriving (Functor, Monad)
 
 runGC :: GenContext a -> Int -> Context -> a
-runGC (GC g) seed ctx = evalState g (0, ctx, gen)
+runGC (GC g) seed ctx = evalState g (0, ctx, gen, [])
   where
     gen = snd . next . mkStdGen $ seed
+
+getNextId :: GenContext Id
+getNextId = GC $ fmap (nextId . (^. _2)) get
 
 getDepth :: GenContext Depth
 getDepth = GC $ fmap (^. _1) get
@@ -46,22 +49,23 @@ getDepth = GC $ fmap (^. _1) get
 getRandomR :: (Int, Int) -> GenContext Int
 getRandomR p = GC $ state f
   where
-    f (d, c, g) = let (a, g') = randomR p g in (a, (d, c, g'))
+    f (d, c, g, s) = let (a, g') = randomR p g in (a, (d, c, g', s))
 
 getRandomBool :: GenContext Bool
 getRandomBool = getRandomR (0,1) >>= return . (==1)
 
 localLambda :: [Type] -> GenContext a -> GenContext a
 localLambda ts (GC g) = GC $ do
-    (depth, c, gen) <- get
+    (depth, c, gen, s) <- get
     let len = length ts
         uses = 10 -- FIXME: arbitrarily chosen
-        vars = C [ (Just uses, Prim (toVar i, [], [t]))
-                 | (i, t) <- zip [depth..] ts
+        idx  = nextId c
+        vars = C [ (Just uses, Prim (i, toVar c, [], [t]))
+                 | (i, c, t) <- zip3 [idx..] [depth..] ts
                  ]
-    put (depth + len, vars <> c, gen)
+    put (depth + len, vars <> c, gen, s)
     a <- g
-    modify (\(_, C c, gen) -> (depth, C (drop len c), gen))
+    modify (\(_, C c, gen, s) -> (depth, C (drop len c), gen, s))
     return a
   where
     -- FIXME: might capture variable names
@@ -70,11 +74,15 @@ localLambda ts (GC g) = GC $ do
 getMatching :: Type -> GenContext [Primitive]
 getMatching t = GC $ do
     ps <- fmap (unContext . (^. _2)) get
-    return [ Prim (e, c, ts')
-           | (mn, (Prim (e, c, ts))) <- ps
-           , Just ts' <- [ matchWith t (c, ts) ]
-           , maybe True (> 0) mn
-           ]
+    let matching = [ Prim (i, e, c, ts')
+                   | (mn, (Prim (i, e, c, ts))) <- ps
+                   , Just ts' <- [ matchWith t (c, ts) ]
+                   , maybe True (> 0) mn
+                   ]
+    applySubstitution matching
+
+-- applySubstitution :: [Primitive] -> GenContext [Primitive]
+applySubstitution ps = return ps
 
 modContext :: (Context -> Context) -> GenContext ()
 modContext f = GC $ modify (& _2 %~ f)
@@ -115,14 +123,3 @@ matchWith t (c, t':ts) = case t `matches` (c, t') of
       where
         ts' = map (subst n t) ts
     (False, _)      -> Nothing
-
-subst :: Name -> Type -> Type -> Type
-subst match new t@(VarT name)
-    | match == name = new
-    | otherwise     = t
-subst match new (AppT t1 t2) = AppT (subst match new t1) (subst match new t2)
-subst match new t@(ForallT ns c t') = case match `elem` map (\(PlainTV n) -> n) ns of
-    True  -> t
-    False -> ForallT ns c (subst match new t')
-subst match new (SigT t k) = SigT (subst match new t) k
-subst _ _ t = t
